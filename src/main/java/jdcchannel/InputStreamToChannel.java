@@ -13,30 +13,29 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  *  NOTE: The caller should be prepared for 'read' returning 0 bytes since it does not block.
  **/
-public class InputStreamToChannel extends Common implements ReadableByteChannel, Runnable {
+public class InputStreamToChannel implements ReadableByteChannel, Runnable {
 
   private InputStream strm;
   private int         rdBfrSz;
   private byte[]      bfrRead;
-  private int         sleepStep;
-  private int         sleepMax;
+  private Delay       delay;
 
-  private boolean     open = true;
-  private Exception   ex = null;        // If the InputStream throws an Exception
+  private volatile Thread      thrd = null;
+  private volatile Exception   ex = null;        // If the InputStream throws an Exception
 
   /** Constructor with InputStream, size to use for the internal buffer, and delay parameters */
-  public InputStreamToChannel(InputStream strm, int rdBfrSz, int sleepStep, int sleepMax) {
+  public InputStreamToChannel(InputStream strm, int rdBfrSz, int sleepStep, int sleepMax, boolean sleepByDoubling) {
     this.strm     = strm;
     this.rdBfrSz  = rdBfrSz;
     this.bfrRead  = new byte[rdBfrSz];
-    this.sleepStep= sleepStep;
-    this.sleepMax = sleepMax;
+    this.delay    = new Delay(sleepStep, sleepMax, sleepByDoubling);
 
-    new Thread(this).start();
+    thrd          = new Thread(this);
+    thrd.start();
   }
   /** Constructor with InputStream and size of staging buffer */
   public InputStreamToChannel(InputStream strm, int rdBfrSz) {
-    this(strm, rdBfrSz, 10, 250);
+    this(strm, rdBfrSz, 8, 256, true);
   }
   /** Constructor specifying only the InputStream */
   public InputStreamToChannel(InputStream strm){
@@ -44,6 +43,8 @@ public class InputStreamToChannel extends Common implements ReadableByteChannel,
   }
   /** Return the original InputStream */
   public InputStream getInputStream() { return strm; }
+  public boolean hadError()               { return ex != null; }
+  public Exception getException()         { return ex; }
 
   /** Amount of data currently staged in the internal buffer */
   public int available() { return rdAvail.get(); }
@@ -59,8 +60,13 @@ public class InputStreamToChannel extends Common implements ReadableByteChannel,
   // Put into 'bb' with any available data - which may be 0. Max is limit() - position()
   //          If buffer has not been wrapped:  ..... data ______ next .....   (_____ == data)
   // Wrapped, some data at end some at start:  _____ next ...... data _____   (..... == available buffer space)
+
   public int read(ByteBuffer bb) throws IOException {
-    if(!open) throw new ClosedChannelException();
+    if(ex!=null){
+      if(ex instanceof IOException ) throw (IOException) ex;
+      else throw new IllegalStateException("Had Exception: " + ex.toString());
+    }
+    if(!isOpen()) throw new ClosedChannelException();
 
     int want = bb.remaining();
     if(want <= 0) return 0;   // No space left in 'bb'
@@ -93,18 +99,17 @@ public class InputStreamToChannel extends Common implements ReadableByteChannel,
   }
 
   public boolean isOpen() {
-    return open;
+    return thrd!=null;
   }
 
   public void close() throws IOException {
-    open = false;
+    thrd = null;
   }
-  public void run() {
-    int lastDelay = 0;
 
-    // Read from the socket into the bfrRead array
+  public void run() {
+    // Read from the InputStream into the bfrRead array
     try {
-      while (true) {
+      while (thrd != null) {
         int avail = strm.available();
         if (avail > 0) {
           int data = rdData.get();
@@ -116,7 +121,7 @@ public class InputStreamToChannel extends Common implements ReadableByteChannel,
             int     n       = Math.min(avail, space);
 
             if (wrapped) {                        // next ... data is the only space avail to write to in bfrRead
-              n = strm.read(bfrRead, next, n);  // Might read less than requested
+              n = strm.read(bfrRead, next, n);    // Might read less than requested
               next += n;
             } else {
               // next ... end of array then 0 ... data are possible spaces if needed
@@ -138,14 +143,20 @@ public class InputStreamToChannel extends Common implements ReadableByteChannel,
             }
 
             synchronized(bfrRead) {                   // Forces memory barrier to write bfrRead contents to memory
-              rdNext.set(next >= rdBfrSz ? 0 : next);
+              delay.reset();
+            }
+            rdNext.set(next >= rdBfrSz ? 0 : next);
+            if(n == -1){
+              thrd = null;
+              return;
             }
           } else
-            lastDelay = delay(lastDelay, sleepStep, sleepMax);
+            delay.delay();
         } else
-          lastDelay = delay(lastDelay, sleepStep, sleepMax);
+          delay.delay();
       }
     } catch (Exception e) {
+      thrd = null;
       ex = e;
       return;
     }
