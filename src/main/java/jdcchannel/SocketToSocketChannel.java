@@ -23,42 +23,72 @@ import java.util.Set;
  */
 
 public class SocketToSocketChannel extends SocketChannel {
+  private String                label;
   private Socket                skt;
   private InputStreamToChannel  instrm;
   private OutputStreamToChannel outstrm;
 
-  int rdBfrSz; int rdSleepStep; int rdSleepMax; boolean rdSleepByDoubling;
-  int wrtBfrSz; int wrtSleepStep; int wrtSleepMax; boolean wrtSleepByDoubling;
+  int rdMaxInFlight;  int rdMaxBfr;   int rdSleepStep; int rdSleepMax; boolean rdSleepByDoubling;
+  int wrtMaxInFlight; int wrtMaxSize; int wrtSleepStep; int wrtSleepMax; boolean wrtSleepByDoubling;
 
-  /** CONSTRUCTOR -- provide all parameters */
-  public SocketToSocketChannel(Socket socket, SelectorProvider selectorProvider, 
-                               int rdBfrSz, int rdSleepStep, int rdSleepMax, boolean rdSleepByDoubling,
-                               int wrtBfrSz, int wrtSleepStep, int wrtSleepMax, boolean wrtSleepByDoubling) throws IOException {
+  /** Facade to taking a regular Socket and generate non-blocking data transfers.
+   *
+   * Data is read from the InputStream, or written to the OutputStream using internal buffers so that read(...) and
+   * write(...) operations do not block the caller - but may return n == 0 bytes were transferred, and the caller
+   * must handle this (usually in some sort of delay loop or posting an event to be re-tried in X milliseconds).
+   *
+   * @param label             - user-defined label for this SocketChannel
+   * @param socket            - the base Socket to treat as a Channel
+   * @param selectorProvider  - NOT USED - passed to Channel, but this does NOT support Selector logic
+   * @param rdMaxInFlight     - Max amount of in-process data before stop reading InputStream until some is consumed
+   * @param rdMaxBuffer       - Max size of InputStream buffer. Note: May exceed rdMaxInFlight if current max + next read exceeds.
+   * @param rdSleepStep       - Delay parameters for processing InputStream - see Delay
+   * @param rdSleepMax        - ditto
+   * @param rdSleepByDoubling - ditto
+   * @param wrtMaxInFlight    - Max output data in-process for the OutputStream. If full, write(...) returns 0 bytes transferred
+   * @param wrtMaxSize        - Smaller write(...) payloads are accumulated and sent in a buffer <= this size
+   *                            Note: - 0 == send every write(...) to OutputStream separately (not recommended)
+   *                                  - if a single write(...) payload is larger, it is sent as-is
+   * @param wrtSleepStep      - Delay parameters for processing OutputStream - see Delay
+   * @param wrtSleepMax       - ditto
+   * @param wrtSleepByDoubling- ditto
+   *
+   * @throws IOException
+   */
+  public SocketToSocketChannel(String label, Socket socket, SelectorProvider selectorProvider,
+                               int rdMaxInFlight, int rdMaxBuffer, int rdSleepStep, int rdSleepMax, boolean rdSleepByDoubling,
+                               int wrtMaxInFlight, int wrtMaxSize, int wrtSleepStep, int wrtSleepMax, boolean wrtSleepByDoubling) throws IOException {
     super(selectorProvider);
 
     if(!socket.isConnected()) throw new IllegalStateException("The Socket must already be connected.");
 
+    this.label              = label;
     this.skt                = socket;
-    this.rdBfrSz            = rdBfrSz;
+    this.rdMaxInFlight      = rdMaxInFlight;
+    this.rdMaxBfr           = rdMaxBuffer;
     this.rdSleepStep        = rdSleepStep;
     this.rdSleepMax         = rdSleepMax;
     this.rdSleepByDoubling  = rdSleepByDoubling;
-    this.wrtBfrSz           = wrtBfrSz;
+    this.wrtMaxInFlight     = wrtMaxInFlight;
+    this.wrtMaxSize         = wrtMaxSize;
     this.wrtSleepStep       = wrtSleepStep;
     this.wrtSleepMax        = wrtSleepMax;
     this.wrtSleepByDoubling = wrtSleepByDoubling;
 
-    instrm = new InputStreamToChannel(skt.getInputStream(), rdBfrSz, rdSleepStep, rdSleepMax, rdSleepByDoubling);
-    outstrm = new OutputStreamToChannel(skt.getOutputStream(), wrtBfrSz, wrtSleepStep, wrtSleepMax, wrtSleepByDoubling);
-
+    instrm  = new InputStreamToChannel(label + " InStrm", skt.getInputStream(), rdMaxInFlight, rdMaxBfr, rdSleepStep, rdSleepMax, rdSleepByDoubling);
+    outstrm = new OutputStreamToChannel(label + " OutStrm", skt.getOutputStream(), wrtMaxInFlight, wrtMaxSize, wrtSleepStep, wrtSleepMax, wrtSleepByDoubling);
   }
   /** CONSTRUCTOR - defaults for all buffer sizes and delays */
-  public SocketToSocketChannel(Socket socket, SelectorProvider provider) throws IOException {
-    this(socket, provider, 4096, 8, 256, true, 4096, 8, 256, true);
+  public SocketToSocketChannel(String label, Socket socket, SelectorProvider provider) throws IOException {
+    this(label, socket, provider, 4096, 1024, 8, 256, true, 4096, 1024, 8, 256, true);
+  }
+  /** CONSTRUCTOR - specify buffer sizes, defaults for all other parameters */
+  public SocketToSocketChannel(String label, Socket socket, SelectorProvider provider, int rdMaxInFlight, int wrtMaxInFlight, int wrtMaxSize) throws IOException {
+    this(label, socket, provider, rdMaxInFlight, 1024, 8, 256, true, wrtMaxInFlight, wrtMaxSize, 8, 256, true);
   }
   /** CONSTRUCTOR - provide only the Socket, all other parameters are defaulted */
-  public SocketToSocketChannel(Socket socket) throws IOException {
-    this(socket, null);
+  public SocketToSocketChannel(String label, Socket socket) throws IOException {
+    this(label, socket, null);
   }
 
   /** Read from the Socket into the ByteBuffer */
@@ -70,7 +100,7 @@ public class SocketToSocketChannel extends SocketChannel {
     return outstrm.write(src);
   }
 
-  // Supported methods that are simple pass-through to the Socket
+  // Supported methods that are simple pass-through to the Socket or basic implementation
   public Socket socket()                                      { return skt; }
   public boolean isConnected()                                { return skt.isConnected(); }
   public boolean isConnectionPending()                        { return !skt.isConnected(); }
@@ -78,6 +108,8 @@ public class SocketToSocketChannel extends SocketChannel {
   public SocketAddress getLocalAddress() throws IOException   { return skt.getLocalSocketAddress(); }
   public SocketChannel shutdownInput() throws IOException     { skt.shutdownInput(); return this; }
   public SocketChannel shutdownOutput() throws IOException    { skt.shutdownOutput(); return this; }
+
+  protected void implConfigureBlocking(boolean block) throws IOException { return; }
 
   /************************* Methods NOT Supported **********************/
   private void throwNYI() { throw new IllegalStateException("NOT YET IMPLEMENTED"); }
@@ -91,7 +123,4 @@ public class SocketToSocketChannel extends SocketChannel {
   public long read(ByteBuffer[] dsts, int offset, int length) throws IOException        { throwNYI(); return -1; }
   public long write(ByteBuffer[] srcs, int offset, int length) throws IOException       { throwNYI(); return -1; }
   protected void implCloseSelectableChannel() throws IOException                        { throwNYI(); return ; }
-  protected void implConfigureBlocking(boolean block) throws IOException                { throwNYI(); return; }
-
-
 }

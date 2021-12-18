@@ -1,135 +1,154 @@
 package jdcchannel;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.WritableByteChannel;
-import java.util.concurrent.atomic.AtomicInteger;
 
+/** Converts an OutputStream to a non-blocking WritableByteChannel.
+ *
+ * An internal FIFO queue is used to store data written by the caller, and a separate
+ * thread then writes it to the OutputStream.
+ *
+ * The write(ByteBuffer src) may return a 0 - no bytes written - if the internal buffer fills
+ * faster than it can be written to the OutputStream. The caller must handle this situation.
+ *
+ */
 public class OutputStreamToChannel implements WritableByteChannel, Runnable {
 
-  private OutputStream  strm;
-  private int           wrtBfrSz;
-  private byte[]        bfrWrite;
-  private Delay         delay;
+  private String                        label;
+  private OutputStream                  strm;
+  private int                           maxInFlight;
+  private int                           maxWriteSz;
+  private Delay                         delay;
 
-  private volatile Thread     thrd;
-  private volatile Exception  ex = null;        // If the OutputStream throws an Exception
+  private ConcurrentLinkedDeque<byte[]> queue = new ConcurrentLinkedDeque<byte[]>();
+  private AtomicInteger                 inFlight = new AtomicInteger(0);
 
-  /** Constructor with OutputStream, size to use for the internal buffer, and delay parameters */
-  public OutputStreamToChannel(OutputStream strm, int wrtBfrSz, int sleepStep, int sleepMax, boolean sleepByDoubling) {
-    this.strm       = strm;
-    this.wrtBfrSz   = wrtBfrSz;
-    this.bfrWrite   = new byte[wrtBfrSz];
-    this.delay      = new Delay(sleepStep, sleepMax, sleepByDoubling);
+  private volatile Thread               thrd=null;
+  private volatile Exception            ex = null;        // If the OutputStream throws an Exception
 
-    wrtSpace = new AtomicInteger(wrtBfrSz);
+  private AtomicInteger                  cntSent = new AtomicInteger(0);    // How many writes to OutputStream
+  private AtomicInteger                  dataSent = new AtomicInteger(0);   // Total data sent to OutputStream
+  /**
+   *
+   * @param strm          - The destination OutputStream
+   * @param maxInFlight   - Max data in flight, after this write(ByteBuffer) returns 0 bytes written. 0 == infinite (not recommended).
+   * @param maxWriteSz    - Will accumulate existing buffers up to this limit before calling the OutputStream.
+   *                        0 == none, send each write(ByteBuffer src) data as given.
+   *                        NOTE: If data longer than this is passed to write(...), then it will be sent as-is.
+   * @param sleepStep     - Params for the Delay - see the docs there.
+   * @param sleepMax      - Ditto
+   * @param sleepDoubling - Ditto
+   */
+  public OutputStreamToChannel(String label, OutputStream strm, int maxInFlight, int maxWriteSz, int sleepStep, int sleepMax, boolean sleepDoubling) {
+    this.label        = label;
+    this.strm         = strm;
+    this.maxInFlight  = maxInFlight;
+    this.maxWriteSz   = maxWriteSz;
+    this.delay        = new Delay(sleepStep, sleepMax, sleepDoubling);
 
-    thrd            = new Thread(this);
+    thrd              = new Thread(this);
     thrd.start();
   }
   /** Constructor with OutputStream and size of staging buffer */
-  public OutputStreamToChannel(OutputStream strm, int rdBfrSz) {
-    this(strm, rdBfrSz, 8, 256, true);
+  public OutputStreamToChannel(String label, OutputStream strm, int maxInFlight, int maxWriteSz) {
+    this(label, strm, maxInFlight, maxWriteSz, 8, 256, true);
   }
   /** Constructor specifying only the OutputStream */
-  public OutputStreamToChannel(OutputStream strm){
-    this(strm, 4096);
+  public OutputStreamToChannel(String label, OutputStream strm){
+    this(label, strm, 4096, 1024);
   }
+
+  /** Number of actual writes to the OutputStream */
+  public int getWrites()                  { return cntSent.get(); }
+  /** Total number of bytes sent to OutputStream */
+  public int getDataSent()                { return dataSent.get(); }
 
   public OutputStream getOutputStream()   { return strm; }
   public boolean isOpen()                 { return thrd != null; }
-  public void close() throws IOException  { thrd = null; }
   public boolean hadError()               { return ex != null; }
   public Exception getException()         { return ex; }
 
-  private AtomicInteger wrtNext  = new AtomicInteger(0);   // Atomic so we can read these outside synchronize
-  private AtomicInteger wrtData  = new AtomicInteger(0);   // ... and if no room left don't synchronize at all
-  private AtomicInteger wrtSpace;                                    // Amount of SPACE available in the buffer
+  public void close() throws IOException  {
+    while(inFlight.get() > 0) delay.delay();
+    strm.close();
+    thrd = null;
+  }
 
-
-  //          If buffer has not been wrapped:  ..... data ______ next .....   (_____ == data)
-  // Wrapped, some data at end some at start:  _____ next ...... data _____   (..... == available buffer space)
-  /** Write from the src ByteBuffer to the socket, return number of bytes actually tranferred
-   *  Actually, writes from 'src' into our internal buffer, then the write Thread writes to the socket
-   **/
-  public int write(ByteBuffer src) throws IOException {
+  public int write(ByteBuffer data) throws IOException {
     if(ex!=null){
       if(ex instanceof IOException ) throw (IOException) ex;
       else throw new IllegalStateException("Had Exception: " + ex.toString());
     }
     if(!isOpen()) throw new ClosedChannelException();
 
-    int want = src.remaining();
-    if(want <= 0) return 0;
-
-    int availSpace  = wrtSpace.get();
-    int n           = Math.min(want, availSpace);
-
-    // Get from src ByteBuffer and write into our internal bfrWrite
-    if(n <= 0)
+    int sending = data.remaining();
+    if(inFlight.get() + sending > maxInFlight)
       return 0;
     else {
-      int next        = wrtNext.get();
-      int data        = wrtData.get();
-      boolean wrapped = next <= data;
-      int spaceToEnd  = wrtBfrSz - next;
-
-      if(wrapped || n <= spaceToEnd){
-        src.get(bfrWrite, next, n);       // Reads from 'src' and puts into bfrWrite
-        next += n;
-      } else {
-        src.get(bfrWrite, next, spaceToEnd);
-        src.get(bfrWrite, 0, n - spaceToEnd);
-        next = n - spaceToEnd;
-      }
-      synchronized(wrtNext) {               // Forces memory barrier for bfrWrite
-        wrtNext.set( next >= wrtBfrSz ? 0 : next);
-        wrtSpace.addAndGet(-n);
-      }
-      return n;
+      byte[] bfr = new byte[sending];
+      data.get(bfr);
+      queue.add(bfr);
+      inFlight.addAndGet(sending);
+      return sending;
     }
   }
 
-  // Write from the buffer to the OutputStream.
+  // Write from the queue to the OutputStream.
   public void run() {
-    while(thrd != null) try {
-      int availData = wrtBfrSz - wrtSpace.get();
-      if(availData > 0){
-        int next;
-        int data;
+    byte[] bfrCombine = maxInFlight > 0 ? new byte[maxInFlight] : null;
 
-        synchronized(wrtNext){              // Clears cache of this CPU so we read wrtBuffer from memory
-          next = wrtNext.get();
-          data = wrtData.get();
-        }
-        if(next <= data){
-          int dataToEnd = wrtBfrSz - data;
-          if(dataToEnd > 0){
-            strm.write(bfrWrite, data, dataToEnd);
-            wrtSpace.addAndGet(dataToEnd);
-            data = 0;
-          }
-          if(next > 0){
-            strm.write(bfrWrite, 0, next);
-            wrtSpace.addAndGet(next);
-            data = next;
-          }
-        } else {        // Not wrapped ..... data ______ next .....   (_____ == data)
-          strm.write(bfrWrite, data, next - data);
-          wrtSpace.addAndGet(next - data);
-          data = next;
-        }
-        wrtData.set(data >= wrtBfrSz ? 0 : data);
-        delay.reset();
-      } else
+    while(thrd != null) try {
+      if(queue.isEmpty())
         delay.delay();
-    } catch(Exception e){
+      else {
+        byte[] peek = queue.peek();               // Must be non-null since Q not empty
+        int amtSent = peek.length;
+
+        if (maxInFlight <= 0) {                   // Always send each block without accumulating data
+          strm.write(peek);                       // May block
+        } else if(peek.length >= maxWriteSz){     // Special case - single blocks sent even if large
+          strm.write(peek);
+        } else {
+          // Check cases to see if we can just send this first buffer
+          byte[] prev = peek;
+          queue.removeFirst();          // Will at least send this first one
+          peek = queue.peek();          // And look at the next one
+          if(peek==null){               // no more in Q
+            strm.write(prev);           // ... so just send this one
+          } else if((prev.length + peek.length) > maxWriteSz){
+            strm.write(prev);
+            peek = null;                // So we don't remove first from Q
+          } else {
+            amtSent = 0;
+            while(peek != null){        // Accumulate several in the buffer, then send it
+              System.arraycopy(prev, 0, bfrCombine, amtSent, prev.length);
+              amtSent += prev.length;
+              peek = queue.peek();
+              if(peek==null || (amtSent + peek.length) > maxWriteSz ){
+                strm.write(bfrCombine, 0, amtSent);
+                peek = null;              // So finish code below does not remove from Q
+              } else {
+                prev = peek;
+                queue.removeFirst();
+              }
+            }
+          }
+        }
+
+        if( peek != null ) queue.removeFirst();
+        cntSent.incrementAndGet();
+        dataSent.addAndGet(amtSent);
+        inFlight.addAndGet( -amtSent );
+        delay.reset();
+      }
+    } catch (Exception e){
       ex = e;
       thrd = null;
-      return;
     }
   }
 }
