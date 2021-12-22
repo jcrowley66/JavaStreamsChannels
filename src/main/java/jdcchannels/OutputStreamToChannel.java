@@ -1,8 +1,7 @@
-package jdcchannel;
+package jdcchannels;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -17,22 +16,13 @@ import java.nio.channels.WritableByteChannel;
  * faster than it can be written to the OutputStream. The caller must handle this situation.
  *
  */
-public class OutputStreamToChannel implements WritableByteChannel, Runnable {
+public class OutputStreamToChannel extends InOutCommon implements WritableByteChannel, Runnable {
 
-  private String                        label;
   private OutputStream                  strm;
   private int                           maxInFlight;
   private int                           maxWriteSz;
   private Delay                         delay;
 
-  private ConcurrentLinkedDeque<byte[]> queue = new ConcurrentLinkedDeque<byte[]>();
-  private AtomicInteger                 inFlight = new AtomicInteger(0);
-
-  private volatile Thread               thrd=null;
-  private volatile Exception            ex = null;        // If the OutputStream throws an Exception
-
-  private AtomicInteger                  cntSent = new AtomicInteger(0);    // How many writes to OutputStream
-  private AtomicInteger                  dataSent = new AtomicInteger(0);   // Total data sent to OutputStream
   /**
    *
    * @param strm          - The destination OutputStream
@@ -63,11 +53,6 @@ public class OutputStreamToChannel implements WritableByteChannel, Runnable {
     this(label, strm, 4096, 1024);
   }
 
-  /** Number of actual writes to the OutputStream */
-  public int getWrites()                  { return cntSent.get(); }
-  /** Total number of bytes sent to OutputStream */
-  public int getDataSent()                { return dataSent.get(); }
-
   public OutputStream getOutputStream()   { return strm; }
   public boolean isOpen()                 { return thrd != null; }
   public boolean hadError()               { return ex != null; }
@@ -79,23 +64,29 @@ public class OutputStreamToChannel implements WritableByteChannel, Runnable {
     thrd = null;
   }
 
+  /** Write from data.position() to data.limit() bytes to the output, return number of bytes written.
+   *  NOTE: Does not block but may return ZERO if no bytes written. Caller must handle this situation.
+   */
   public int write(ByteBuffer data) throws IOException {
-    if(ex!=null){
-      if(ex instanceof IOException ) throw (IOException) ex;
-      else throw new IllegalStateException("Had Exception: " + ex.toString());
-    }
+    throwIfEx();
     if(!isOpen()) throw new ClosedChannelException();
 
     int sending = data.remaining();
-    if(inFlight.get() + sending > maxInFlight)
-      return 0;
+    if(bWrite) {
+      if(sending > 0) {
+        boolean overMax = maxInFlight > 0 && (inFlight.get() + sending) > maxInFlight;
+        debug("Sending " + sending + " bytes, inFlight: " + inFlight.get() + ", OverMax: " + overMax + ", #Writes: " + numWrites.get() + ", TtlDataSent: " + dataWrtn.get());
+      }
+    }
+    if(maxInFlight > 0 && (inFlight.get() + sending) > maxInFlight)
+      sending = 0;
     else {
       byte[] bfr = new byte[sending];
       data.get(bfr);
       queue.add(bfr);
       inFlight.addAndGet(sending);
-      return sending;
     }
+    return sending;
   }
 
   // Write from the queue to the OutputStream.
@@ -111,6 +102,8 @@ public class OutputStreamToChannel implements WritableByteChannel, Runnable {
 
         if (maxInFlight <= 0) {                   // Always send each block without accumulating data
           strm.write(peek);                       // May block
+          numWrites.incrementAndGet();
+          dataWrtn.addAndGet(peek.length);
         } else if(peek.length >= maxWriteSz){     // Special case - single blocks sent even if large
           strm.write(peek);
         } else {
@@ -141,8 +134,8 @@ public class OutputStreamToChannel implements WritableByteChannel, Runnable {
         }
 
         if( peek != null ) queue.removeFirst();
-        cntSent.incrementAndGet();
-        dataSent.addAndGet(amtSent);
+        numWrites.incrementAndGet();
+        dataWrtn.addAndGet(amtSent);
         inFlight.addAndGet( -amtSent );
         delay.reset();
       }

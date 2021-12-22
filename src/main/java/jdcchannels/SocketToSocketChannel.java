@@ -1,4 +1,4 @@
-package jdcchannel;
+package jdcchannels;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -17,6 +17,8 @@ import java.util.Set;
  * - Constructor throws IOException if the getInputStream or getOutputStream of Socket throw
  * - Only supports the read(ByteBuffer dst) and write(ByteBuffer src) methods plus some that are simple
  *    pass-through calls to the Socket. All of the rest will throw an exception if called.
+ * - isBlocking and configureBlocking methods are essentially ignored (and cannot be overridden!). This
+ *   SocketChannel will always operate in a non-blocking mode.
  *
  * Creates a READ Thread and a WRITE Thread to handle the read(...) & write(...) methods as non-blocking. Caller
  * must be able to handle a read(bfr) or write(bfr) which returns 0 bytes processed. Read may also return -1 == EOF
@@ -25,7 +27,7 @@ import java.util.Set;
 public class SocketToSocketChannel extends SocketChannel {
   private String                label;
   private Socket                skt;
-  private InputStreamToChannel  instrm;
+  public InputStreamToChannel   instrm;
   private OutputStreamToChannel outstrm;
 
   int rdMaxInFlight;  int rdMaxBfr;   int rdSleepStep; int rdSleepMax; boolean rdSleepByDoubling;
@@ -59,7 +61,6 @@ public class SocketToSocketChannel extends SocketChannel {
                                int rdMaxInFlight, int rdMaxBuffer, int rdSleepStep, int rdSleepMax, boolean rdSleepByDoubling,
                                int wrtMaxInFlight, int wrtMaxSize, int wrtSleepStep, int wrtSleepMax, boolean wrtSleepByDoubling) throws IOException {
     super(selectorProvider);
-
     if(!socket.isConnected()) throw new IllegalStateException("The Socket must already be connected.");
 
     this.label              = label;
@@ -74,6 +75,8 @@ public class SocketToSocketChannel extends SocketChannel {
     this.wrtSleepStep       = wrtSleepStep;
     this.wrtSleepMax        = wrtSleepMax;
     this.wrtSleepByDoubling = wrtSleepByDoubling;
+
+    configureBlocking(false);
 
     instrm  = new InputStreamToChannel(label + " InStrm", skt.getInputStream(), rdMaxInFlight, rdMaxBfr, rdSleepStep, rdSleepMax, rdSleepByDoubling);
     outstrm = new OutputStreamToChannel(label + " OutStrm", skt.getOutputStream(), wrtMaxInFlight, wrtMaxSize, wrtSleepStep, wrtSleepMax, wrtSleepByDoubling);
@@ -91,14 +94,28 @@ public class SocketToSocketChannel extends SocketChannel {
     this(label, socket, null);
   }
 
-  /** Read from the Socket into the ByteBuffer */
+  /** Read from the Socket into the ByteBuffer. Return 0 if not data available, -1 if EOF */
   public int read(ByteBuffer dst) throws IOException {
     return instrm.read(dst);
   }
-  /** Write from the ByteBuffer to the Socket */
+  /** Write from the ByteBuffer to the Socket, returns 0 if no bytes written and caller must handle */
   public int write(ByteBuffer src) throws IOException {
     return outstrm.write(src);
   }
+
+  /** Amount of data currently staged in the InputStream internal buffer. NOTE: Returns -1 if EOF **/
+  public int inInFlight() { return instrm.inFlight(); }
+  public int available()  { return inInFlight(); }
+  /** Number of physical reads completed on the InputStream */
+  public int numReads()   { return instrm.numReads(); }
+  /** Total data read from the InputStream */
+  public int dataRead()   { return instrm.dataRead(); }
+  /** The number of physical writes completed to the OutputStream. */
+  public int numWrites()   { return outstrm.numWrites(); }
+  /** Total number of bytes sent to the OutputStream */
+  public int dataSent()    { return outstrm.dataSent(); }
+  /** Number of bytes queued to be sent to the OutputStream */
+  public int outInFlight() { return outstrm.inFlight(); }
 
   // Supported methods that are simple pass-through to the Socket or basic implementation
   public Socket socket()                                      { return skt; }

@@ -1,4 +1,4 @@
-package jdcchannel;
+package jdcchannels;
 
 /** Provide an increasing Delay of a process - thread-safe */
 public class Delay {
@@ -54,21 +54,20 @@ public class Delay {
    **/
   public int delay(int lastDelay, int sleepStep, int sleepMax, boolean byDoubling) {
     if(sleepStep==0) return 0;            // NO-OP, no delay at all
-    synchronized(this) {
-      int sleepFor = lastDelay >= sleepMax
-                      ? sleepMax
-                      : lastDelay==0
-                        ? sleepStep
-                        : byDoubling
-                          ? (lastDelay * 2)
-                          : (lastDelay + sleepStep);
-      if(bDebug) {
-        ln("Delay for: " + sleepFor);
-        if(bStack) Thread.currentThread().dumpStack();
-      }
-      Delay.threadSleep(sleepFor);
-      return sleepFor;
+
+    int sleepFor = lastDelay >= sleepMax
+                    ? sleepMax
+                    : lastDelay==0
+                      ? sleepStep
+                      : byDoubling
+                        ? (lastDelay * 2)
+                        : (lastDelay + sleepStep);
+    if(bDebug) {
+      ln("Delay for: " + sleepFor);
+      if(bStack) Thread.currentThread().dumpStack();
     }
+    Delay.threadSleep(sleepFor);
+    return sleepFor;
   }
 
   /****************************************************************************************/

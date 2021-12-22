@@ -1,11 +1,10 @@
-package jdcchannel;
+package jdcchannels;
 
 import java.io.InputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
 import java.util.Arrays;
-import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Converts an InputStream to a non-blocking ReadableByteChannel. The InputStream must already be Open.
@@ -14,22 +13,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  *  NOTE: The caller should be prepared for 'read' returning 0 bytes since it does not block.
  **/
-public class InputStreamToChannel implements ReadableByteChannel, Runnable {
+public class InputStreamToChannel extends InOutCommon implements ReadableByteChannel, Runnable {
 
-  private final boolean bDebug = false;
-  private final boolean bRead  = bDebug && true;
-  private final boolean bThread= bDebug && true;
-
-  private String      label;
   private InputStream strm;
   private int         maxInFlight;
   private byte[]      bfr;
   private Delay       delay;
-
-  private ConcurrentLinkedDeque<byte[]> queue    = new ConcurrentLinkedDeque<byte[]>();
-  private AtomicInteger                 rdAvail  = new AtomicInteger(0);   // Amount of DATA available
-  private volatile Thread               thrd     = null;      // When set back to null, at EOF
-  private volatile Exception            ex       = null;      // If the InputStream throws an Exception
 
   /** CONSTRUCTOR - all parameters specified
    *
@@ -68,11 +57,6 @@ public class InputStreamToChannel implements ReadableByteChannel, Runnable {
   public boolean hadError()           { return ex != null; }
   public Exception getException()     { return ex; }
 
-  /** Amount of data currently staged in the internal buffer
-   *  NOTE: Returns -1 if EOF
-   **/
-  public int available() { return thrd==null ? -1 : rdAvail.get(); }
-
   public boolean isOpen() {
     return thrd!=null;
   }
@@ -81,30 +65,47 @@ public class InputStreamToChannel implements ReadableByteChannel, Runnable {
     if(thrd != null) {
       strm.close();
       thrd = null;
-      rdAvail.set(-1);
+      inFlight.set(-1);
     }
   }
 
+  /** Read into the ByteBuffer and return the amount of data read, -1 if EOF.
+   *
+   * NOTE: Will return ZERO bytes read if no data is available and caller should handle.
+   */
   public int read(ByteBuffer bb) throws IOException {
-    if(ex!=null){
-      if(ex instanceof IOException ) throw (IOException) ex;
-      else throw new IllegalStateException("Had Exception: " + ex.toString());
+    if(bRdDtl){
+      debugShowQueue("InputREAD", 99);
     }
 
-    int avail = rdAvail.get();
-    if(thrd==null && avail <= 0) {
-      rdAvail.set(-1);
+    throwIfEx();
+
+    int avail = inFlight.get();
+    if(thrd==null && avail <= 0) {      // Closed the thread and no more data in flight
+      inFlight.set(-1);
       return -1;              // EOF
     }
 
     int want = bb.remaining();
-    if(want <= 0) return 0;   // No space left in 'bb'
+    if(want <= 0) {
+      if(bRead) debug("No space in ByteBuffer, returning 0");
+      return 0;   // No space left in 'bb'
+    }
 
     // Read from Q and put out to the ByteBuffer - return number of bytes transferred, 0 if none
-
+    if(bRdDtl){
+      if(!queue.isEmpty()) {
+        byte[] b = queue.peek();
+        debug("READ Before -- Peek: " + debugShowItem(0, b));
+        debug("READ Before -- Pos:" + bb.position() + ", Limit: " + bb.limit() + ", Want: " + want + ", Poll: " + b.length + ", Avail: " + inFlight.get() + ", QueueSz: " + queue.size());
+      }
+    }
     int amtRead = 0;
     while(want > 0 && !queue.isEmpty()){
       byte[] bfr = queue.poll();
+      if(bRdDtl){
+        debug("READ after POLL - " + debugShowItem(0, bfr));
+      }
       if(bfr.length <= want){
         bb.put(bfr);
         want    -= bfr.length;
@@ -120,29 +121,43 @@ public class InputStreamToChannel implements ReadableByteChannel, Runnable {
         want    = 0;
       }
     }
-    rdAvail.addAndGet( -amtRead );
+    inFlight.addAndGet( -amtRead );
+    if(bRead){
+      if(amtRead != 0) debug("READ After -- AmtRead: " + amtRead + " bytes, Avail: " + inFlight.get() + ", #Reads: " + numReads.get() + ", TtlData: " + dataRead.get());
+    }
     return amtRead;
   }
 
   public void run() {
-    if(bThread) debug("Started thread");
+    if(bThread) debug("STARTED thread");
     // Read from the InputStream into the bfrRead array
     try {
       while (thrd != null) {
-        if (maxInFlight > 0 && rdAvail.get() >= maxInFlight)
+        if (maxInFlight > 0 && inFlight.get() >= maxInFlight)
           delay.delay();
         else {
           int n = strm.read(bfr);               // May block
-          if(n == -1)
+          if(bWrtDtl) debug("In THREAD, read " + n + " bytes");
+          if(n == -1) {
             close();
-          else if(n > 0){
+            if(bWrtDtl) debug("CLOSED");
+          } else if(n > 0){
+            boolean fullBfr = n == bfr.length;
             if(n == bfr.length) {
               queue.add(bfr);
               bfr = new byte[bfr.length];
             } else {
-              queue.add(Arrays.copyOfRange(bfr, 0, n));
+              byte[] cpy = Arrays.copyOfRange(bfr, 0, n);
+              if(bWrtDtl) debug("ADDING TO Q: " + debugShowItem(-1, cpy));
+              queue.add(cpy);
             }
-            rdAvail.addAndGet(n);
+            inFlight.addAndGet(n);
+            numReads.incrementAndGet();
+            dataRead.addAndGet(n);
+
+            if(bWrtDtl){
+              debugShowQueue("   Thrd", 99);
+            }
             delay.reset();
           } else
             delay.delay();
@@ -151,16 +166,12 @@ public class InputStreamToChannel implements ReadableByteChannel, Runnable {
     } catch (Exception e) {
       thrd = null;
       ex = e;
-      return;
+      if(bThread) {
+        debug("ENDING thread - Ex: " + e.toString());
+        e.printStackTrace();
+      }
     }
-  }
-
-  private static void ln(String s) { System.out.println(s); }
-
-  private void debug(String s) {
-    if(bDebug){
-      ln("DEBUG -- " + label + ": " + s);
-    }
+    if(bThread) debug("Thread ENDED -----");
   }
 }
 
