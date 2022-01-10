@@ -1,4 +1,4 @@
-package jdcchannels;
+package jdcchannel;
 
 import java.io.IOException;
 import java.util.concurrent.ConcurrentLinkedDeque;

@@ -1,11 +1,10 @@
-package jdcchannels;
+package jdcchannel;
 
 import java.io.InputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
 import java.util.Arrays;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /** Converts an InputStream to a non-blocking ReadableByteChannel. The InputStream must already be Open.
  *

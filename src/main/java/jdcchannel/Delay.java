@@ -1,4 +1,4 @@
-package jdcchannels;
+package jdcchannel;
 
 /** Provide an increasing Delay of a process - thread-safe */
 public class Delay {

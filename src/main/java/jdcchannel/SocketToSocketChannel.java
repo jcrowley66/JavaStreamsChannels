@@ -1,4 +1,4 @@
-package jdcchannels;
+package jdcchannel;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -83,7 +83,7 @@ public class SocketToSocketChannel extends SocketChannel {
   }
   /** CONSTRUCTOR - defaults for all buffer sizes and delays */
   public SocketToSocketChannel(String label, Socket socket, SelectorProvider provider) throws IOException {
-    this(label, socket, provider, 4096, 1024, 8, 256, true, 4096, 1024, 8, 256, true);
+    this(label, socket, provider, 1024 * 10, 1024 * 10, 8, 256, true, 4096, 1024, 8, 256, true);
   }
   /** CONSTRUCTOR - specify buffer sizes, defaults for all other parameters */
   public SocketToSocketChannel(String label, Socket socket, SelectorProvider provider, int rdMaxInFlight, int wrtMaxInFlight, int wrtMaxSize) throws IOException {

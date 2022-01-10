@@ -1,4 +1,4 @@
-package jdcchannels;
+package jdcchannel;
 
 import java.io.*;
 import java.nio.*;

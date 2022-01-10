@@ -1,4 +1,4 @@
-package jdcchannels;
+package jdcchannel;
 
 public class TestSocketChannel {
 

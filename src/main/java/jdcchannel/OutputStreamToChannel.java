@@ -1,8 +1,7 @@
-package jdcchannels;
+package jdcchannel;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.WritableByteChannel;
@@ -78,7 +77,7 @@ public class OutputStreamToChannel extends InOutCommon implements WritableByteCh
         debug("Sending " + sending + " bytes, inFlight: " + inFlight.get() + ", OverMax: " + overMax + ", #Writes: " + numWrites.get() + ", TtlDataSent: " + dataWrtn.get());
       }
     }
-    if(maxInFlight > 0 && (inFlight.get() + sending) > maxInFlight)
+    if(maxInFlight > 0 && sending <= maxInFlight && (inFlight.get() + sending) > maxInFlight)
       sending = 0;
     else {
       byte[] bfr = new byte[sending];
