@@ -1,4 +1,4 @@
-# JavaStreamsChannels
+# jdcchannel
 
 These utilities allow an InputStream or OutputStream to be converted to non-blocking Channels.
 
