@@ -17,10 +17,12 @@ import java.nio.channels.WritableByteChannel;
  */
 public class OutputStreamToChannel extends InOutCommon implements WritableByteChannel, Runnable {
 
-  private OutputStream                  strm;
-  private int                           maxInFlight;
-  private int                           maxWriteSz;
-  private Delay                         delay;
+  private OutputStream  strm;
+  private int           maxInFlight;
+  private int           maxWriteSz;
+  private int           sleepStep;
+  private int           sleepMax;
+  private boolean       sleepByDoubling;
 
   /**
    *
@@ -34,11 +36,13 @@ public class OutputStreamToChannel extends InOutCommon implements WritableByteCh
    * @param sleepDoubling - Ditto
    */
   public OutputStreamToChannel(String label, OutputStream strm, int maxInFlight, int maxWriteSz, int sleepStep, int sleepMax, boolean sleepDoubling) {
-    this.label        = label;
-    this.strm         = strm;
-    this.maxInFlight  = maxInFlight;
-    this.maxWriteSz   = maxWriteSz;
-    this.delay        = new Delay(sleepStep, sleepMax, sleepDoubling);
+    this.label            = label;
+    this.strm             = strm;
+    this.maxInFlight      = maxInFlight;
+    this.maxWriteSz       = maxWriteSz;
+    this.sleepStep        = sleepStep;
+    this.sleepMax         = sleepMax;
+    this.sleepByDoubling  = sleepByDoubling;
 
     thrd              = new Thread(this);
     thrd.start();
@@ -58,7 +62,7 @@ public class OutputStreamToChannel extends InOutCommon implements WritableByteCh
   public Exception getException()         { return ex; }
 
   public void close() throws IOException  {
-    while(inFlight.get() > 0) delay.delay();
+    while(inFlight.get() > 0) try{ Thread.sleep(100); } catch( Exception e ) { }
     strm.close();
     thrd = null;
   }
@@ -70,26 +74,30 @@ public class OutputStreamToChannel extends InOutCommon implements WritableByteCh
     throwIfEx();
     if(!isOpen()) throw new ClosedChannelException();
 
-    int sending = data.remaining();
-    if(bWrite) {
-      if(sending > 0) {
-        boolean overMax = maxInFlight > 0 && (inFlight.get() + sending) > maxInFlight;
-        debug("Sending " + sending + " bytes, inFlight: " + inFlight.get() + ", OverMax: " + overMax + ", #Writes: " + numWrites.get() + ", TtlDataSent: " + dataWrtn.get());
+    synchronized(data) {
+      int sending = data.remaining();
+      if (bWrite) {
+        if (sending > 0) {
+          boolean overMax = maxInFlight > 0 && (inFlight.get() + sending) > maxInFlight;
+          debug("Sending " + sending + " bytes, inFlight: " + inFlight.get() + ", OverMax: " + overMax + ", #Writes: " + numWrites.get() + ", TtlDataSent: " + dataWrtn.get());
+        }
       }
+      if (maxInFlight > 0 && sending <= maxInFlight && (inFlight.get() + sending) > maxInFlight)
+        sending = 0;
+      else {
+        byte[] bfr = new byte[sending];
+        data.get(bfr);
+        queue.add(bfr);
+        inFlight.addAndGet(sending);
+      }
+      return sending;
     }
-    if(maxInFlight > 0 && sending <= maxInFlight && (inFlight.get() + sending) > maxInFlight)
-      sending = 0;
-    else {
-      byte[] bfr = new byte[sending];
-      data.get(bfr);
-      queue.add(bfr);
-      inFlight.addAndGet(sending);
-    }
-    return sending;
   }
 
   // Write from the queue to the OutputStream.
   public void run() {
+    Delay delay       = new Delay(sleepStep, sleepMax, sleepByDoubling);
+
     byte[] bfrCombine = maxInFlight > 0 ? new byte[maxInFlight] : null;
 
     while(thrd != null) try {

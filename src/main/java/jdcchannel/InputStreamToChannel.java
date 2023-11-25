@@ -16,8 +16,10 @@ public class InputStreamToChannel extends InOutCommon implements ReadableByteCha
 
   private InputStream strm;
   private int         maxInFlight;
-  private byte[]      bfr;
-  private Delay       delay;
+  private int         rdBfrSz;
+  private int         sleepStep;
+  private int         sleepMax;
+  private boolean     sleepByDoubling;
 
   /** CONSTRUCTOR - all parameters specified
    *
@@ -31,13 +33,15 @@ public class InputStreamToChannel extends InOutCommon implements ReadableByteCha
    * @param sleepByDoubling - Ditto
    */
   public InputStreamToChannel(String label, InputStream strm, int maxInFlight, int rdBfrSz, int sleepStep, int sleepMax, boolean sleepByDoubling) {
-    this.label        = label;
-    this.strm         = strm;
-    this.maxInFlight  = maxInFlight;
-    this.bfr          = new byte[rdBfrSz];
-    this.delay        = new Delay(sleepStep, sleepMax, sleepByDoubling);
+    this.label            = label;
+    this.strm             = strm;
+    this.maxInFlight      = maxInFlight;
+    this.rdBfrSz          = rdBfrSz;
+    this.sleepStep        = sleepStep;
+    this.sleepMax         = sleepMax;
+    this.sleepByDoubling  = sleepByDoubling;
 
-    thrd              = new Thread(this);
+    thrd                  = new Thread(this);
     thrd.start();
   }
   /** Constructor with InputStream and maxInFlight - default Delay settings */
@@ -84,51 +88,58 @@ public class InputStreamToChannel extends InOutCommon implements ReadableByteCha
       inFlight.set(-1);
       return -1;              // EOF
     }
+    synchronized(bb) {
+      int want = bb.remaining();
+      if (want <= 0) {
+        if (bRead) debug("No space in ByteBuffer, returning 0");
+        return 0;   // No space left in 'bb'
+      }
 
-    int want = bb.remaining();
-    if(want <= 0) {
-      if(bRead) debug("No space in ByteBuffer, returning 0");
-      return 0;   // No space left in 'bb'
-    }
-
-    // Read from Q and put out to the ByteBuffer - return number of bytes transferred, 0 if none
-    if(bRdDtl){
-      if(!queue.isEmpty()) {
-        byte[] b = queue.peek();
-        debug("READ Before -- Peek: " + debugShowItem(0, b));
-        debug("READ Before -- Pos:" + bb.position() + ", Limit: " + bb.limit() + ", Want: " + want + ", Poll: " + b.length + ", Avail: " + inFlight.get() + ", QueueSz: " + queue.size());
+      // Read from Q and put out to the ByteBuffer - return number of bytes transferred, 0 if none
+      if (bRdDtl) {
+        if (!queue.isEmpty()) {
+          byte[] b = queue.peek();
+          debug("READ Before -- Peek: " + debugShowItem(0, b));
+          debug("READ Before -- Pos:" + bb.position() + ", Limit: " + bb.limit() + ", Want: " + want + ", Poll: " + b.length + ", Avail: " + inFlight.get() + ", QueueSz: " + queue.size());
+        }
       }
-    }
-    int amtRead = 0;
-    while(want > 0 && !queue.isEmpty()){
-      byte[] bfr = queue.poll();
-      if(bRdDtl){
-        debug("READ after POLL - " + debugShowItem(0, bfr));
+      int amtRead = 0;
+      while (want > 0 && !queue.isEmpty()) {
+        byte[] bfrIn = queue.poll();
+        if (bRdDtl) {
+          debug("READ after POLL - " + debugShowItem(0, bfrIn));
+        }
+        if (bfrIn.length <= want) {
+          bb.put(bfrIn);
+          want -= bfrIn.length;
+          amtRead += bfrIn.length;
+        } else {
+          // First item in Q is larger than space left in the request buffer
+          // Copy 'want' bytes to output, make smaller byte[] and stick back on front of Q
+          bb.put(bfrIn, 0, want);
+          int remainAmt = bfrIn.length - want;
+          byte[] remains = new byte[remainAmt];
+          System.arraycopy(bfrIn, want, remains, 0, remainAmt);
+          queue.addFirst(remains);
+          if (bRdRmn) debugShowQueue(label, 128);
+          amtRead += want;
+          want = 0;
+        }
       }
-      if(bfr.length <= want){
-        bb.put(bfr);
-        want    -= bfr.length;
-        amtRead += bfr.length;
-      } else {
-        // First item in Q is larger than space left in the request buffer
-        // Copy 'want' bytes to output, make smaller byte[] and stick back on front of Q
-        bb.put(bfr, 0, want);
-        byte[] remains = new byte[bfr.length - want];
-        System.arraycopy(bfr, want, remains, 0, bfr.length - want);
-        queue.addFirst(remains);
-        amtRead += want;
-        want    = 0;
+      inFlight.addAndGet(-amtRead);
+      if (bRead) {
+        if (amtRead != 0)
+          debug("READ After -- AmtRead: " + amtRead + " bytes, Avail: " + inFlight.get() + ", #Reads: " + numReads.get() + ", TtlData: " + dataRead.get());
       }
+      return amtRead;
     }
-    inFlight.addAndGet( -amtRead );
-    if(bRead){
-      if(amtRead != 0) debug("READ After -- AmtRead: " + amtRead + " bytes, Avail: " + inFlight.get() + ", #Reads: " + numReads.get() + ", TtlData: " + dataRead.get());
-    }
-    return amtRead;
   }
 
   public void run() {
     if(bThread) debug("STARTED thread");
+    byte[] bfr    = new byte[rdBfrSz];
+    Delay  delay  = new Delay(sleepStep, sleepMax, sleepByDoubling);
+
     // Read from the InputStream into the bfrRead array
     try {
       while (thrd != null) {
@@ -141,14 +152,15 @@ public class InputStreamToChannel extends InOutCommon implements ReadableByteCha
             close();
             if(bWrtDtl) debug("CLOSED");
           } else if(n > 0){
-            boolean fullBfr = n == bfr.length;
             if(n == bfr.length) {
-              queue.add(bfr);
-              bfr = new byte[bfr.length];
+              synchronized(bfr) {             // The queue is OK, but need to sync for data within the buffer
+                queue.add(bfr);
+              }
+              bfr = new byte[rdBfrSz];
             } else {
               byte[] cpy = Arrays.copyOfRange(bfr, 0, n);
               if(bWrtDtl) debug("ADDING TO Q: " + debugShowItem(-1, cpy));
-              queue.add(cpy);
+              synchronized(cpy){ queue.add(cpy); }
             }
             inFlight.addAndGet(n);
             numReads.incrementAndGet();

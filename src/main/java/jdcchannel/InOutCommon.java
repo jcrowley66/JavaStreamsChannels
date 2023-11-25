@@ -6,12 +6,14 @@ import java.util.concurrent.atomic.*;
 
 public class InOutCommon {
 
-  protected final boolean bDebug = false;
-  protected final boolean bRead  = bDebug && true;
-  protected final boolean bRdDtl = bRead && false;
-  protected final boolean bWrite = bDebug && true;
-  protected final boolean bWrtDtl= bWrite && false;
-  protected final boolean bThread= bDebug && true;
+  protected final boolean bDebug    = false;
+  protected final boolean bRead     = bDebug && false;
+  protected final boolean bRdDtl    = bRead && false;
+  protected final boolean bRdEmpty  = bRead && false;
+  protected final boolean bRdRmn    = bRead && false;
+  protected final boolean bWrite    = bDebug && false;
+  protected final boolean bWrtDtl   = bWrite && false;
+  protected final boolean bThread   = bDebug && false;
 
   // Active only for InputStreamToChannel
   protected AtomicInteger numReads  = new AtomicInteger(0);  // Physical reads of InputStream that completed
@@ -63,12 +65,12 @@ public class InOutCommon {
     }
   }
 
-  protected final int     nItemSz= 16;      // max data to show
+  protected final int     nItemSz= 64;      // max data to show
   
   protected String debugShowItem(int index, byte[] data){
     String s  = "";
     if(bDebug){
-      int    sz = data.length < nItemSz ? data.length : nItemSz;
+      int    sz = data.length <= nItemSz ? data.length : nItemSz;
       String mk = data.length > nItemSz ? "..." : "";
       for(int i=0; i<sz; i++){
         byte b = data[i];
@@ -77,7 +79,7 @@ public class InOutCommon {
         s += sdata + ",";
         
       }
-      s = "  QItem -- " + index + "  " + s + mk;
+      s = "  QItem[" + index + "](" + data.length + ") -- " + s + mk;
     }
     return s;
   }
@@ -85,12 +87,16 @@ public class InOutCommon {
   protected void debugShowQueue(String labelIn, int max){
     if(bDebug){
       int sz = queue.size();
-      debug(labelIn + " -- Queue Size: " + sz + ", ID: " + System.identityHashCode(queue) + " This: " + System.identityHashCode(this));
+      if(sz==0 && !bRdEmpty) return;
+
+      String qSz  = Integer.toString(sz);
+      if(sz==0) qSz = "(Empty)";
+      String qStr = labelIn + " -- QueueSz: " + sz + ", ID/This: " + System.identityHashCode(queue) + "/" + System.identityHashCode(this);
       Object[] obj = queue.toArray();
       if(obj.length==0)
-        debug(labelIn + " -- toArray -- Queue is EMPTY");
+        debug(qStr);
       else for(int i=0; i<obj.length; i++){
-        debug(labelIn + " -- ToArray -- " + debugShowItem(i, (byte[])obj[i]));
+        debug(labelIn + debugShowItem(i, (byte[])obj[i]));
       }
     }
   }

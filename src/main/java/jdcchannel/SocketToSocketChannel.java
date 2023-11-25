@@ -22,6 +22,8 @@ import java.util.Set;
  *
  * Creates a READ Thread and a WRITE Thread to handle the read(...) & write(...) methods as non-blocking. Caller
  * must be able to handle a read(bfr) or write(bfr) which returns 0 bytes processed. Read may also return -1 == EOF
+ *
+ * NOTE: the read(bytebuffer) and write(bytebuffer) methods SYNCHRONIZE on the ByteBuffer since they are not thread safe.
  */
 
 public class SocketToSocketChannel extends SocketChannel {
@@ -94,6 +96,9 @@ public class SocketToSocketChannel extends SocketChannel {
     this(label, socket, null);
   }
 
+  public String toString() {
+    return "SktChannel[" + label + ", From: " + socket().getRemoteSocketAddress().toString() + "]";
+  }
   /** Read from the Socket into the ByteBuffer. Return 0 if not data available, -1 if EOF */
   public int read(ByteBuffer dst) throws IOException {
     return instrm.read(dst);
